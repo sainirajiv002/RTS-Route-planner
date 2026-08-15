@@ -508,11 +508,19 @@ td.num,th.num{text-align:right}
       <p>126 Rider-route nodes, geo-clustered (5 km) and grouped into fixed zones (≤20 km span) — zones and clusters don't change day to day, only routes do. Routes combine across every cluster in a zone to maximize fill, then combine again onto riders and vehicles until fleet capacity (25 riders + 5 vehicles) is fully used. Lines show real drive order from B Block, numbered stop-by-stop. Click a route, a cluster, or a zone to drill in.</p>
     </div>
 
-    <div class="grid g4 stagger" style="margin-bottom:16px">
+    <div class="grid g4 stagger" id="p3StatsGrid" style="margin-bottom:16px;grid-template-columns:repeat(5,1fr)">
       <div class="stat"><div class="n mono" id="statzones" data-count="16">0</div><div class="lbl">Zones</div><div class="foot">geo-clustered, ≤20km span</div></div>
       <div class="stat"><div class="n mono" id="statclusters" data-count="31">0</div><div class="lbl">Clusters</div><div class="foot">≤5km radius · every cluster routed</div></div>
       <div class="stat"><div class="n mono" id="statroutes" data-count="42">0</div><div class="lbl">Routes</div><div class="foot">35 rider · 7 vehicle</div></div>
       <div class="stat"><div class="n mono" id="statkm" data-count="0">0</div><div class="lbl">Planned km</div><div class="foot">hub → stop 1 → stop 2 → …</div></div>
+      <div class="stat"><div class="n mono" id="statAssignedPending" style="color:var(--p3)" data-count="0">0</div><div class="lbl">Nodes assigned</div><div class="foot" id="statPendingFoot">— pending</div></div>
+    </div>
+
+    <div class="filterbar" style="margin-bottom:16px;gap:8px">
+      <span class="eyebrow" style="margin-right:2px">View by</span>
+      <span class="chip on" id="viewByZoneBtn">Zone</span>
+      <span class="chip" id="viewByClusterBtn">Cluster</span>
+      <select id="clusterFilterSelect" style="display:none;padding:5px 10px;border:1px solid var(--line);border-radius:100px;font-size:11px;background:#FBFCFB;margin-left:4px"></select>
     </div>
 
     <div class="split">
@@ -870,7 +878,44 @@ function paintZoneChips(){
     activeZoneIdx=parseInt(c.dataset.zi); activeClusterKey=null; routeFilter=null; paintAll();
   });
   const rc=document.getElementById('recenterchip'); if(rc) rc.onclick=()=>drawMap();
+  populateClusterFilter();
 }
+
+function populateClusterFilter(){
+  const sel=document.getElementById('clusterFilterSelect'); if(!sel) return;
+  const prev = sel.value;
+  const options=[];
+  DATA.reverse.zones.forEach((z,zi)=>z.clusters.forEach(c=>{
+    options.push({zi, name:c.name, label:`${c.name} (${z.label})`, nodes:c.nodes});
+  }));
+  options.sort((a,b)=>a.name.localeCompare(b.name));
+  sel.innerHTML = `<option value="">— choose a cluster —</option>` +
+    options.map(o=>`<option value="${o.zi}|${o.name}">${o.name} · ${o.nodes} nodes</option>`).join('');
+  if(prev) sel.value = prev;
+}
+
+let viewByMode = 'zone';
+function setViewByMode(mode){
+  viewByMode = mode;
+  const zoneBtn=document.getElementById('viewByZoneBtn'), clusterBtn=document.getElementById('viewByClusterBtn');
+  const zonechips=document.getElementById('zonechips'), clusterSel=document.getElementById('clusterFilterSelect');
+  if(mode==='zone'){
+    zoneBtn.classList.add('on'); clusterBtn.classList.remove('on');
+    zonechips.style.display=''; clusterSel.style.display='none';
+  } else {
+    zoneBtn.classList.remove('on'); clusterBtn.classList.add('on');
+    zonechips.style.display='none'; clusterSel.style.display='';
+    populateClusterFilter();
+  }
+}
+document.getElementById('viewByZoneBtn') && (document.getElementById('viewByZoneBtn').onclick=()=>setViewByMode('zone'));
+document.getElementById('viewByClusterBtn') && (document.getElementById('viewByClusterBtn').onclick=()=>setViewByMode('cluster'));
+document.getElementById('clusterFilterSelect') && (document.getElementById('clusterFilterSelect').onchange=function(){
+  if(!this.value) return;
+  const [zi, name] = this.value.split('|');
+  activeZoneIdx = parseInt(zi); activeClusterKey = name; routeFilter = name;
+  paintAll();
+});
 
 function allRoutesFlat(){
   const out=[];
@@ -937,14 +982,29 @@ function drawMap(highlightRouteCode){
 
 function highlightRoute(code){ drawMap(code); paintRouteTable(); }
 
+function assignedNodeIdSet(){
+  const s = new Set();
+  if(window.DISPATCH){
+    window.DISPATCH.riders.forEach(r=>r.routes.forEach(rt=>rt.stops.forEach(st=>s.add(st.node_id))));
+    window.DISPATCH.vehicles.forEach(v=>v.routes.forEach(rt=>rt.stops.forEach(st=>s.add(st.node_id))));
+  }
+  return s;
+}
 function paintTree(){
   const z=DATA.reverse.zones[activeZoneIdx];
   document.getElementById('treezonelabel').textContent=z.label;
   document.getElementById('treeclustercount').textContent=z.clusters.length+' clusters';
   const t=document.getElementById('tree');
-  t.innerHTML=z.clusters.map(c=>`<div class="c${c.name===activeClusterKey?' on':''}" data-cname="${c.name}">
+  const assigned = assignedNodeIdSet();
+  t.innerHTML=z.clusters.map(c=>{
+    const nodeIds = z.routes.filter(rt=>rt.clusters_touched.includes(c.name)).flatMap(rt=>rt.stops.filter(s=>s.cluster===c.name).map(s=>s.node_id));
+    const uniqueIds=[...new Set(nodeIds)];
+    const assignedCt = uniqueIds.filter(id=>assigned.has(id)).length;
+    const pendingCt = c.nodes - assignedCt;
+    return `<div class="c${c.name===activeClusterKey?' on':''}" data-cname="${c.name}">
     <span><b class="mono" style="font-weight:600">${c.name}</b></span>
-    <em class="mono">${c.nodes} nodes · ${c.shipments} shp</em></div>`).join('');
+    <em class="mono">${c.nodes} nodes · ${c.shipments} shp${pendingCt>0?` · <span style="color:var(--alert)">${assignedCt} assigned, ${pendingCt} pending</span>`:` · all assigned`}</em></div>`;
+  }).join('');
   t.querySelectorAll('.c').forEach(el=>el.onclick=()=>{ activeClusterKey=el.dataset.cname; routeFilter=null; paintAll(); });
 }
 
@@ -953,7 +1013,12 @@ function paintClusterRoutes(){
   const c=z.clusters.find(c=>c.name===activeClusterKey)||z.clusters[0];
   if(!activeClusterKey) activeClusterKey=c.name;
   document.getElementById('routeclustername').textContent='Cluster '+c.name;
-  document.getElementById('routeclusterkm').textContent=c.nodes+' nodes';
+  const assigned = assignedNodeIdSet();
+  const nodeIds = z.routes.filter(rt=>rt.clusters_touched.includes(c.name)).flatMap(rt=>rt.stops.filter(s=>s.cluster===c.name).map(s=>s.node_id));
+  const uniqueIds=[...new Set(nodeIds)];
+  const assignedCt = uniqueIds.filter(id=>assigned.has(id)).length;
+  const pendingCt = c.nodes - assignedCt;
+  document.getElementById('routeclusterkm').textContent = pendingCt>0 ? `${assignedCt}/${c.nodes} assigned` : `${c.nodes} nodes`;
   const touching = z.routes.map((rt,ri)=>({rt,ri})).filter(x=>x.rt.clusters_touched.includes(c.name));
   document.getElementById('routes').innerHTML = touching.map(({rt,ri})=>{
     const code=`R-${z.label.slice(0,3).toUpperCase()}${activeZoneIdx}-${String(ri).padStart(2,'0')}`;
@@ -992,10 +1057,19 @@ function paintRouteTable(){
   }
   tb.querySelectorAll('tr[data-code]').forEach(el=>el.onclick=()=>highlightRoute(el.dataset.code));
 
-  document.getElementById('statzones').dataset.count = DATA.reverse.summary.zones;
-  document.getElementById('statclusters').dataset.count = DATA.reverse.summary.clusters;
+  document.getElementById('statzones').dataset.count = DATA.reverse.zones.length;
+  document.getElementById('statclusters').dataset.count = DATA.reverse.zones.reduce((s,z)=>s+z.clusters.length,0);
   document.getElementById('statroutes').dataset.count = all.length;
   document.getElementById('statkm').dataset.count = Math.round(all.reduce((s,r)=>s+r.km,0));
+
+  const assigned = assignedNodeIdSet();
+  const totalKnownNodes = DATA.reverse.zones.reduce((s,z)=>s+z.clusters.reduce((s2,c)=>s2+c.nodes,0),0);
+  const assignedTotal = assigned.size;
+  const pendingTotal = Math.max(0, totalKnownNodes - assignedTotal);
+  const apEl=document.getElementById('statAssignedPending');
+  if(apEl){ apEl.dataset.count = assignedTotal; countUpView('p3'); }
+  const pf=document.getElementById('statPendingFoot');
+  if(pf) pf.textContent = pendingTotal>0 ? `${pendingTotal} pending — carried to next plan` : 'all assigned';
 }
 
 function paintAll(){ paintZoneChips(); drawMap(); paintTree(); paintClusterRoutes(); paintRouteTable(); }
@@ -1078,28 +1152,55 @@ function routeKm(stops){
   return Math.round(km*10)/10;
 }
 function packRoutesForZone(members){
-  const NODE_CAP=RULES.node_cap_per_route, SHIP_CAP=RULES.shipment_cap_per_route, VEH_THRESH=RULES.vehicle_solo_threshold;
+  const NODE_CAP=RULES.node_cap_per_route, SHIP_CAP=RULES.shipment_cap_per_route, VEH_SHIP_CAP=RULES.vehicle_shipment_cap;
   const sorted = [...members].sort((a,b)=>b.shipments-a.shipments);
-  const routes=[]; let cur=[], curShip=0;
-  sorted.forEach(m=>{
-    if(m.shipments>=VEH_THRESH){
-      if(cur.length){ routes.push(cur); cur=[]; curShip=0; }
-      routes.push([m]); return;
+
+  // Vehicle-first: any node that alone can't fit a rider (>= rider shipment cap) MUST go on a van.
+  // Instead of giving each one its own van, pack as MANY of them together as possible (up to 6
+  // nodes / van shipment cap) so vans carry real volume instead of one big node each.
+  const mustBeVan = sorted.filter(m=>m.shipments>=SHIP_CAP);
+  const canBeRider = sorted.filter(m=>m.shipments<SHIP_CAP);
+
+  function binPack(items, nodeCap, shipCap){
+    const bins=[]; let cur=[], curShip=0;
+    items.forEach(m=>{
+      if(cur.length && (cur.length>=nodeCap || curShip+m.shipments>shipCap)){ bins.push(cur); cur=[]; curShip=0; }
+      cur.push(m); curShip+=m.shipments;
+    });
+    if(cur.length) bins.push(cur);
+    return bins;
+  }
+
+  const vanBins = binPack(mustBeVan, NODE_CAP, VEH_SHIP_CAP);
+
+  // Exhaust remaining van capacity: if the last van bin has room left (under node/shipment cap),
+  // pull in additional smaller nodes (largest first) before those nodes go to riders at all.
+  const leftoverSmall = [...canBeRider];
+  if(vanBins.length){
+    const lastVan = vanBins[vanBins.length-1];
+    let vanNodes = lastVan.length, vanShip = lastVan.reduce((a,m)=>a+m.shipments,0);
+    for(let i=0; i<leftoverSmall.length; ){
+      const m = leftoverSmall[i];
+      if(vanNodes>=NODE_CAP || vanShip+m.shipments>VEH_SHIP_CAP){ i++; continue; }
+      lastVan.push(m); vanNodes++; vanShip+=m.shipments;
+      leftoverSmall.splice(i,1);
     }
-    if(cur.length && (cur.length>=NODE_CAP || curShip+m.shipments>SHIP_CAP)){ routes.push(cur); cur=[]; curShip=0; }
-    cur.push(m); curShip+=m.shipments;
-  });
-  if(cur.length) routes.push(cur);
-  return routes.map(rt=>{
-    const ordered = orderStopsFromHub(rt);
-    const ship = ordered.reduce((a,s)=>a+s.shipments,0);
-    const isV = ordered.length===1 && ordered[0].shipments>=VEH_THRESH;
-    const cap = isV ? RULES.vehicle_shipment_cap : SHIP_CAP;
-    return {type:isV?'vehicle':'rider', nodes:ordered.length, shipments:ship,
-      km: routeKm(ordered), fill_pct: Math.round(ship/cap*1000)/10,
-      clusters_touched:[...new Set(ordered.map(s=>s.cluster_code))],
-      stops: ordered.map(s=>({node_id:s.node_id, name:s.name, sort_code:s.sort_code, lat:s.lat, lng:s.lng, shipments:s.shipments, cluster:s.cluster, cluster_code:s.cluster_code}))};
-  });
+  }
+
+  const riderBins = binPack(leftoverSmall, NODE_CAP, SHIP_CAP);
+
+  function finalize(bins, isVehicle){
+    return bins.map(rt=>{
+      const ordered = orderStopsFromHub(rt);
+      const ship = ordered.reduce((a,s)=>a+s.shipments,0);
+      const cap = isVehicle ? VEH_SHIP_CAP : SHIP_CAP;
+      return {type:isVehicle?'vehicle':'rider', nodes:ordered.length, shipments:ship,
+        km: routeKm(ordered), fill_pct: Math.round(ship/cap*1000)/10,
+        clusters_touched:[...new Set(ordered.map(s=>s.cluster))],
+        stops: ordered.map(s=>({node_id:s.node_id, name:s.name, sort_code:s.sort_code, lat:s.lat, lng:s.lng, shipments:s.shipments, cluster:s.cluster, cluster_code:s.cluster_code}))};
+    });
+  }
+  return [...finalize(vanBins, true), ...finalize(riderBins, false)];
 }
 function buildZonesFromGeocoded(geocoded){
   const byZone={};
@@ -1156,8 +1257,8 @@ function rebuildFromRawRows(){
   DATA.summary.pincode_update_sellers = buckets.pincodeUpdate.length;
 
   activeZoneIdx = 0; activeClusterKey = newZones.length ? newZones[0].clusters[0].name : null; routeFilter = null;
-  if(document.getElementById('map')) paintAll();
   renderRiders();
+  if(document.getElementById('map')) paintAll();
   renderExceptions();
   const ccEl=document.getElementById('ruleClusterCount'); if(ccEl) ccEl.textContent = FIXED_CLUSTERS.length;
   const zcEl=document.getElementById('ruleZoneCount'); if(zcEl) zcEl.textContent = newZones.length;
@@ -1166,7 +1267,10 @@ function rebuildFromRawRows(){
   if(st) st.textContent = `Loaded: ${buckets.riderRoute.length} rider-route nodes, ${geocoded.length} geocoded (${unmapped.length} unmapped), ${newZones.length} zones formed.`;
 }
 document.getElementById('clearfilter').addEventListener('click',()=>{ routeFilter=null; drawMap(); paintRouteTable(); });
-if(document.getElementById('map')){ activeClusterKey = DATA.reverse.zones[0].clusters[0].name; paintAll(); }
+if(document.getElementById('map')){
+  renderRiders(); // compute DISPATCH first so P3 cards can show assigned/pending counts
+  activeClusterKey = DATA.reverse.zones[0].clusters[0].name; paintAll();
+}
 
 /* ============ riders: bin-pack real routes into 25 riders / 5 vehicles, NEVER mixing zones ============ */
 function renderRiders(){
@@ -1265,6 +1369,28 @@ function renderRiders(){
     }
   });
 
+  // For nodes that still couldn't fit anywhere under the strict caps, suggest the single best
+  // EXISTING rider/vehicle to extend (ignoring the cap) so ops can decide manually — e.g.
+  // "add to R-04, which would need to go to 8 nodes."
+  stillUnassigned.forEach(stop=>{
+    let best=null;
+    [['rider',riders], ['vehicle',vehicles]].forEach(([kind,pool])=>{
+      pool.forEach((veh,idx)=>{
+        const path = flatPath(veh);
+        const {extra, base} = cheapestInsertion(path, stop);
+        const pct = base>0 ? extra/base*100 : 999;
+        if(!best || extra<best.extra) best = {extra, pct, veh, kind, idx};
+      });
+    });
+    if(best){
+      stop.suggestion = {
+        kind: best.kind, idx: best.idx,
+        wouldBeNodes: best.veh.nodes+1, wouldBeShipments: best.veh.shipments+stop.shipments,
+        extraKm: Math.round(best.extra*100)/100
+      };
+    }
+  });
+
   const rows=[
     ...riders.map((r,i)=>({id:'R-'+String(i+1).padStart(2,'0'),label:'Rider '+(i+1),codes:r.routes.map(x=>x.code).join(', '),area:r.routes[0].zoneLabel+' / '+r.routes[0].clustersTouched.join('+'),nodes:r.nodes,shipments:r.shipments,km:r.km.toFixed(1),cap:RIDER_SHIP})),
     ...vehicles.map((v,i)=>({id:'V-'+(i+1),label:'Vehicle '+(i+1),codes:v.routes.map(x=>x.code).join(', '),area:v.routes[0].zoneLabel+' / '+v.routes[0].clustersTouched.join('+'),nodes:v.nodes,shipments:v.shipments,km:v.km.toFixed(1),cap:VEH_SHIP}))
@@ -1323,8 +1449,17 @@ function renderExceptions(){
   const tb=document.getElementById('t-exceptions'); if(!tb) return;
   const carried = (window.DISPATCH && window.DISPATCH.stillUnassigned) || [];
   const rows=[
-    ...carried.map(s=>({name:s.name, area:s.cluster, shipments:s.shipments, sortCode:s.sort_code||'—',
-      why:`No fitting route or nearby en-route slot (fleet fully used: ${RULES.rider_count}/${RULES.rider_count} riders, ${RULES.vehicle_count}/${RULES.vehicle_count} vehicles)`, tag:'t2', action:'Next plan'})),
+    ...carried.map(s=>{
+      let why, action;
+      if(s.suggestion){
+        const id = s.suggestion.kind==='rider' ? `R-${String(s.suggestion.idx+1).padStart(2,'0')}` : `V-${s.suggestion.idx+1}`;
+        why = `Nearest fit: ${id} (${s.suggestion.extraKm}km detour) — would need to extend to ${s.suggestion.wouldBeNodes} nodes / ${s.suggestion.wouldBeShipments} shp`;
+        action = `Suggest ${id}`;
+      } else {
+        why = 'No existing route found nearby'; action = 'Next plan';
+      }
+      return {name:s.name, area:s.cluster, shipments:s.shipments, sortCode:s.sort_code||'—', why, tag:'t2', action};
+    }),
     ...(DATA.unmapped||[]).slice(0,8).map(u=>({name:u.seller_name, area:'—', shipments:u.shipments, sortCode:'—', why:'Address could not be geocoded', tag:'tw', action:'Fix address'}))
   ];
   tb.innerHTML=rows.map(r=>`<tr><td>${r.sortCode} · ${r.name}</td><td>${r.area}</td><td class="num mono">${r.shipments}</td>
@@ -1373,115 +1508,4 @@ const replaceBtn = document.getElementById('replaceFileBtn');
 if(replaceBtn && fileInput){
   replaceBtn.addEventListener('click', ()=>fileInput.click());
   fileInput.addEventListener('change', (e)=>{
-    const file = e.target.files[0]; if(!file) return;
-    if(typeof XLSX==='undefined'){ alert('File-reading library did not load — check your internet connection.'); return; }
-    const reader = new FileReader();
-    reader.onload = (evt)=>{
-      try{
-        const wb = XLSX.read(evt.target.result, {type:'binary'});
-        const sheet = wb.Sheets[wb.SheetNames[0]];
-        const rows = XLSX.utils.sheet_to_json(sheet, {defval:''});
-        if(!rows.length){ alert('That file has no readable rows.'); return; }
-        rawUploadedRows = rows;
-        const fn=document.getElementById('fileNameDisplay'); if(fn) fn.textContent = file.name;
-        const fm=document.getElementById('fileMetaDisplay'); if(fm) fm.textContent = `${rows.length} rows · read just now`;
-        rebuildFromRawRows();
-      } catch(err){
-        alert('Could not read that file: ' + err.message);
-      }
-    };
-    reader.readAsBinaryString(file);
-  });
-}
-
-countUpView('upload');
-
-/* ============ Export to Excel (client-side, via SheetJS) ============ */
-function todayStr(){
-  const d=new Date();
-  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
-}
-function sheetFromRows(rows, headers){
-  const ws = XLSX.utils.json_to_sheet(rows, {header:headers});
-  ws['!cols'] = headers.map(h=>({wch: Math.max(10, h.length+2)}));
-  return ws;
-}
-
-function exportBlockA(){
-  if(typeof XLSX==='undefined'){ alert('Export library did not load — check your internet connection.'); return; }
-  const rows = DATA.blockA_bags.map(b=>({'Sort code':b['Sort code'], 'Sellers in bag':b.sellers||'', 'Nodes':b.nodes, 'Shipments':b.shipments}));
-  const ws = sheetFromRows(rows, ['Sort code','Sellers in bag','Nodes','Shipments']);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Block-A Manifest');
-  XLSX.writeFile(wb, `Block-A_Manifest_${todayStr()}.xlsx`);
-}
-
-function exportRoutes(){
-  if(typeof XLSX==='undefined'){ alert('Export library did not load — check your internet connection.'); return; }
-  const routeRows=[], stopRows=[];
-  const assignLookup = {};       // route code -> rider/vehicle ID (for routes assigned whole)
-  const nodeAssignLookup = {};   // node_id -> rider/vehicle ID (covers individually-inserted nodes too)
-  if(window.DISPATCH){
-    window.DISPATCH.riders.forEach((r,i)=>{
-      const id = `R-${String(i+1).padStart(2,'0')}`;
-      r.routes.forEach(x=>{ assignLookup[x.code]=id; x.stops.forEach(s=>nodeAssignLookup[s.node_id]=id); });
-    });
-    window.DISPATCH.vehicles.forEach((v,i)=>{
-      const id = `V-${i+1}`;
-      v.routes.forEach(x=>{ assignLookup[x.code]=id; x.stops.forEach(s=>nodeAssignLookup[s.node_id]=id); });
-    });
-  }
-  allRoutesFlat().forEach(r=>{
-    routeRows.push({'Route':r.code,'Zone':r.zoneLabel,'Type':r.type,'Nodes':r.nodes,'Shipments':r.shipments,
-      'Km':r.km,'Fill %':Math.round(r.fill_pct)+'%','Clusters touched':r.clustersTouched.join(' + '),
-      'Assigned to':assignLookup[r.code]||'—'});
-    r.stops.forEach((s,si)=>{
-      stopRows.push({'Route':r.code,'Assigned to':nodeAssignLookup[s.node_id]||'—','Zone':r.zoneLabel,'Type':r.type,
-        'Stop #':si+1,'Sort code':s.sort_code||'—','Node ID':s.node_id,'Seller':s.name,'Shipments':s.shipments,'Cluster':s.cluster});
-    });
-  });
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, sheetFromRows(routeRows, ['Route','Zone','Type','Nodes','Shipments','Km','Fill %','Clusters touched','Assigned to']), 'Route Summary');
-  XLSX.utils.book_append_sheet(wb, sheetFromRows(stopRows, ['Route','Assigned to','Zone','Type','Stop #','Sort code','Node ID','Seller','Shipments','Cluster']), 'Route Detail');
-  if(window.DISPATCH && window.DISPATCH.stillUnassigned && window.DISPATCH.stillUnassigned.length){
-    const unRows = window.DISPATCH.stillUnassigned.map(s=>({'Sort code':s.sort_code||'—','Node ID':s.node_id,'Seller':s.name,
-      'Zone':s.zone||'','Cluster':s.cluster,'Shipments':s.shipments,'Reason':'No route or nearby en-route slot fits under caps/detour limit'}));
-    XLSX.utils.book_append_sheet(wb, sheetFromRows(unRows, ['Sort code','Node ID','Seller','Zone','Cluster','Shipments','Reason']), 'Carried to Next Plan');
-  }
-  XLSX.writeFile(wb, `RTS_Routes_${todayStr()}.xlsx`);
-}
-
-function exportZonesClusters(){
-  if(typeof XLSX==='undefined'){ alert('Export library did not load — check your internet connection.'); return; }
-  const rows = (DATA.cluster_centroids||[]).map((c,i)=>({'#':i+1,'Zone':c.zone,'Cluster':c.cluster,'Lat':c.lat,'Lng':c.lng}));
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, sheetFromRows(rows, ['#','Zone','Cluster','Lat','Lng']), 'Zone-Cluster Centroids');
-  XLSX.writeFile(wb, `RTS_Zones_Clusters_${todayStr()}.xlsx`);
-}
-
-function exportDispatch(){
-  if(typeof XLSX==='undefined'){ alert('Export library did not load — check your internet connection.'); return; }
-  if(!window.DISPATCH){ alert('Dispatch data not ready yet — open the Rider assignment tab first.'); return; }
-  const rows=[];
-  window.DISPATCH.riders.forEach((r,i)=>rows.push({'ID':`R-${String(i+1).padStart(2,'0')}`,'Type':'Rider',
-    'Routes carried':r.routes.map(x=>x.code).join(', '),'Zone(s)':[...new Set(r.routes.filter(x=>x.zoneLabel).map(x=>x.zoneLabel))].join(', '),
-    'Nodes':r.nodes,'Shipments':r.shipments,'Km':Math.round(r.km*10)/10,'Load fill %':Math.round(r.shipments/100*100)+'%'}));
-  window.DISPATCH.vehicles.forEach((v,i)=>rows.push({'ID':`V-${i+1}`,'Type':'Vehicle',
-    'Routes carried':v.routes.map(x=>x.code).join(', '),'Zone(s)':[...new Set(v.routes.filter(x=>x.zoneLabel).map(x=>x.zoneLabel))].join(', '),
-    'Nodes':v.nodes,'Shipments':v.shipments,'Km':Math.round(v.km*10)/10,'Load fill %':Math.round(v.shipments/1200*100)+'%'}));
-  if(window.DISPATCH.stillUnassigned) window.DISPATCH.stillUnassigned.forEach(s=>rows.push({'ID':'CARRIED OVER','Type':'—',
-    'Routes carried':s.sort_code||s.node_id,'Zone(s)':s.zone||'','Nodes':1,'Shipments':s.shipments,'Km':'','Load fill %':''}));
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, sheetFromRows(rows, ['ID','Type','Routes carried','Zone(s)','Nodes','Shipments','Km','Load fill %']), 'Dispatch Sheet');
-  XLSX.writeFile(wb, `RTS_Dispatch_${todayStr()}.xlsx`);
-}
-
-const b1=document.getElementById('exportP1Btn'); if(b1) b1.addEventListener('click', exportBlockA);
-const b2=document.getElementById('exportRoutesBtn'); if(b2) b2.addEventListener('click', exportRoutes);
-const b3=document.getElementById('exportRidersBtn'); if(b3) b3.addEventListener('click', exportDispatch);
-const b4=document.getElementById('exportZonesBtn'); if(b4) b4.addEventListener('click', exportZonesClusters);
-
-
-</script>
-</body>
-</html>
+    const file = e.target.files[0]; if(!
