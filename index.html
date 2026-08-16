@@ -961,11 +961,13 @@ function drawMap(highlightRouteCode){
   let colorIdx=0;
 
   zonesToShow.forEach(({z,zi})=>{
-    L.circle([z.lat,z.lng],{radius:(z.span_km/2)*1000,color:'#9FC7B2',weight:1,dashArray:'4 4',fill:false,interactive:false}).addTo(mapLayer);
+    const safeSpanKm = (typeof z.span_km === 'number' && !isNaN(z.span_km) && z.span_km > 0) ? z.span_km : 4;
+    L.circle([z.lat,z.lng],{radius:(safeSpanKm/2)*1000,color:'#9FC7B2',weight:1,dashArray:'4 4',fill:false,interactive:false}).addTo(mapLayer);
 
     z.clusters.forEach(c=>{
       const sel = activeClusterKey===c.name;
-      const cRadius = Math.max(700, Math.min(2600, Math.sqrt(c.shipments)*80));
+      const safeShp = (typeof c.shipments === 'number' && !isNaN(c.shipments)) ? c.shipments : 0;
+      const cRadius = Math.max(700, Math.min(2600, Math.sqrt(safeShp)*80));
       const circle=L.circle([c.lat,c.lng],{radius:cRadius,color:sel?'#2C7A57':'#9FC7B2',weight:sel?2:1,fillColor:'#2C7A57',fillOpacity:sel?0.12:0.05,dashArray:sel?null:'3 3'}).addTo(mapLayer);
       circle.bindTooltip(`<b>${c.name}</b><br>${z.label}<br>${c.nodes} nodes · ${c.shipments} shp`,{sticky:true});
       circle.on('click',()=>{ activeZoneIdx=zi; activeClusterKey=c.name; routeFilter=null; paintAll(); });
@@ -1264,10 +1266,18 @@ function buildZonesFromGeocoded(geocoded){
     const members = byZone[label];
     const clustersMap={};
     members.forEach(m=>{ (clustersMap[m.cluster_code]=clustersMap[m.cluster_code]||{code:m.cluster_code,name:m.cluster,nodes:0,shipments:0,lat:m.lat,lng:m.lng}).nodes++; clustersMap[m.cluster_code].shipments+=m.shipments; });
+    const zLat = members.reduce((a,m)=>a+m.lat,0)/members.length;
+    const zLng = members.reduce((a,m)=>a+m.lng,0)/members.length;
+    // span_km: diameter needed to cover every cluster in this zone from its centroid.
+    // Without this, drawMap()'s zone-boundary circle gets radius = NaN and Leaflet throws.
+    const clusterList = Object.values(clustersMap);
+    const maxDist = clusterList.length ? Math.max(...clusterList.map(c=>haversineGeo(zLat,zLng,c.lat,c.lng))) : 2;
+    const spanKm = Math.max(4, maxDist*2);
     return {
-      label, lat: members.reduce((a,m)=>a+m.lat,0)/members.length, lng: members.reduce((a,m)=>a+m.lng,0)/members.length,
+      label, lat: zLat, lng: zLng,
       shipments: members.reduce((a,m)=>a+m.shipments,0),
-      clusters: Object.values(clustersMap),
+      span_km: spanKm,
+      clusters: clusterList,
       routes: packRoutesForZone(members)
     };
   });
