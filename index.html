@@ -745,7 +745,8 @@ function showTip(html,x,y){ tip.innerHTML=html; tip.style.left=(x+14)+'px'; tip.
 function hideTip(){ tip.classList.remove('on'); }
 
 /* ============ build sequence ============ */
-document.getElementById('buildbtn').onclick=()=>{
+const buildbtnEl = document.getElementById('buildbtn');
+if(buildbtnEl) buildbtnEl.onclick=()=>{
   const btn=document.getElementById('buildbtn');
   const wrap=document.getElementById('loadwrap'), holder=document.getElementById('lsteps'), bar=document.getElementById('lbarfill'), pct=document.getElementById('lpct');
   const steps=[`Reading ${S.total_shipments.toLocaleString()} shipments`,'Matching Service type against plan rules','Splitting Block-A · NDD OFD · Rider route','Excluding Pincode-update from planning','Geocoding sellers and building zones','Packing clusters into routes'];
@@ -770,7 +771,8 @@ document.getElementById('buildbtn').onclick=()=>{
 };
 
 /* ============ publish ============ */
-document.getElementById('publishbtn').onclick=function(){
+const publishbtnEl = document.getElementById('publishbtn');
+if(publishbtnEl) publishbtnEl.onclick=function(){
   const el=document.getElementById('planstate');
   el.textContent='Published'; el.style.color='#8FE0A8';
   this.textContent='Published ✓'; this.style.background='#8FE0A8';
@@ -1383,10 +1385,15 @@ function rebuildFromRawRows(){
   if(st) st.textContent = `Loaded: ${buckets.riderRoute.length} rider-route nodes, ${geocoded.length} geocoded (${unmapped.length} unmapped), ${newZones.length} zones formed.`;
   return true;
 }
-document.getElementById('clearfilter').addEventListener('click',()=>{ routeFilter=null; drawMap(); paintRouteTable(); });
-if(document.getElementById('map')){
-  renderRiders(); // compute DISPATCH first so P3 cards can show assigned/pending counts
-  activeClusterKey = DATA.reverse.zones[0].clusters[0].name; paintAll();
+const clearfilterBtn = document.getElementById('clearfilter');
+if(clearfilterBtn) clearfilterBtn.addEventListener('click',()=>{ routeFilter=null; drawMap(); paintRouteTable(); });
+try{
+  if(document.getElementById('map')){
+    renderRiders(); // compute DISPATCH first so P3 cards can show assigned/pending counts
+    activeClusterKey = DATA.reverse.zones[0].clusters[0].name; paintAll();
+  }
+} catch(e){
+  console.error('Initial map/riders render failed (non-fatal, continuing script):', e);
 }
 
 /* ============ riders: bin-pack real routes into 25 riders / 5 vehicles, NEVER mixing zones ============ */
@@ -1548,10 +1555,10 @@ function renderRiders(){
   if(noteEl){
     const b = noteEl.querySelector('b'), s = noteEl.querySelector('span');
     if(stillUnassigned.length===0){
-      b.textContent = `Fits comfortably: ${riders.length} of 25 riders and ${vehicles.length} of 5 vehicles used, zero left over.`;
+      b.textContent = `Fits comfortably: ${riders.length} of ${RIDER_N} riders and ${vehicles.length} of ${VEH_N} vehicles used, zero left over.`;
       s.textContent = `Same-zone routes combine onto a rider or vehicle wherever they fit, plus ${insertedCount} node(s) slotted in en route to a nearby stop (under 3km / 40% extra detour) rather than getting their own trip.`;
     } else {
-      b.textContent = `${riders.length} of 25 riders and ${vehicles.length} of 5 vehicles used. ${insertedCount} node(s) slotted in en route; ${stillUnassigned.length} still carried to next plan.`;
+      b.textContent = `${riders.length} of ${RIDER_N} riders and ${vehicles.length} of ${VEH_N} vehicles used. ${insertedCount} node(s) slotted in en route; ${stillUnassigned.length} still carried to next plan.`;
       s.textContent = `Those didn't fit any rider/vehicle's remaining capacity AND weren't close enough to an existing route to justify the detour — a real leftover, not an artificial cutoff.`;
     }
   }
@@ -1559,7 +1566,7 @@ function renderRiders(){
   // expose the computed dispatch (rider/vehicle -> routes) for the Excel export buttons
   window.DISPATCH = { riders, vehicles, unassigned, stillUnassigned };
 }
-renderRiders();
+try{ renderRiders(); } catch(e){ console.error('renderRiders (2nd call) failed:', e); }
 
 /* ============ exceptions ============ */
 function renderExceptions(){
@@ -1582,7 +1589,7 @@ function renderExceptions(){
   tb.innerHTML=rows.map(r=>`<tr><td>${r.sortCode} · ${r.name}</td><td>${r.area}</td><td class="num mono">${r.shipments}</td>
     <td>${r.why}</td><td><span class="tag ${r.tag}">${r.action}</span></td></tr>`).join('');
 }
-renderExceptions();
+try{ renderExceptions(); } catch(e){ console.error('renderExceptions (initial call) failed:', e); }
 
 /* ============ rules: highlight edits + real save/rebuild ============ */
 document.querySelectorAll('.rulegroup input').forEach(inp=>{
@@ -1732,8 +1739,8 @@ setTimeout(()=>{
   }
 }, 2500);
 
-refreshTopLevelStats();
-countUpView('upload');
+try{ refreshTopLevelStats(); } catch(e){ console.error('refreshTopLevelStats (initial call) failed:', e); }
+try{ countUpView('upload'); } catch(e){ console.error('countUpView failed:', e); }
 
 /* ============ Export to Excel (client-side, via SheetJS) ============ */
 function todayStr(){
