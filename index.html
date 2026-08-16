@@ -277,8 +277,10 @@ td.num,th.num{text-align:right}
     <div class="drop done" id="dropzone">
       <h3 id="fileNameDisplay">Assignment_file.xlsx</h3>
       <p class="mono" style="margin:5px 0 14px" id="fileMetaDisplay">20,521 rows · read just now</p>
-      <input type="file" id="fileInput" accept=".csv,.xlsx,.xls" style="display:none">
-      <button class="btn ghost" id="replaceFileBtn">Replace file</button>
+      <div id="libWarning" style="display:none;background:#FBEEED;border:1px solid #E4B0AC;color:#7A4D0E;font-size:11.5px;padding:8px 12px;border-radius:3px;margin-bottom:12px;text-align:left"></div>
+      <label for="fileInput" class="btn ghost" id="replaceFileBtn" style="display:inline-block;cursor:pointer">Choose file to replace</label>
+      <input type="file" id="fileInput" accept=".csv,.xlsx,.xls" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0">
+      <div id="uploadStatus" style="font-size:11px;color:var(--faint);margin-top:8px"></div>
     </div>
 
     <div class="hr"></div>
@@ -1502,10 +1504,144 @@ if(sv) sv.addEventListener('click',function(){
   }, 300);
 });
 
-/* ============ file upload: real replace-file button ============ */
+/* ============ file upload: real replace-file input (native <label for> trigger — no JS click() needed, works on every browser/mobile webview) ============ */
 const fileInput = document.getElementById('fileInput');
-const replaceBtn = document.getElementById('replaceFileBtn');
-if(replaceBtn && fileInput){
-  replaceBtn.addEventListener('click', ()=>fileInput.click());
+const uploadStatusEl = document.getElementById('uploadStatus');
+function setUploadStatus(msg, isError){
+  if(!uploadStatusEl) return;
+  uploadStatusEl.textContent = msg;
+  uploadStatusEl.style.color = isError ? 'var(--alert)' : 'var(--faint)';
+}
+if(fileInput){
   fileInput.addEventListener('change', (e)=>{
-    const file = e.target.files[0]; if(!
+    const file = e.target.files[0];
+    if(!file){ setUploadStatus('No file selected.', true); return; }
+    setUploadStatus(`Reading ${file.name}…`);
+    if(typeof XLSX==='undefined'){
+      setUploadStatus('File-reading library did not load — check your internet connection and reload the page.', true);
+      alert('File-reading library did not load — check your internet connection and reload the page.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onerror = ()=> setUploadStatus('Could not read the file from disk.', true);
+    reader.onload = (evt)=>{
+      try{
+        const wb = XLSX.read(evt.target.result, {type:'array'});
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(sheet, {defval:''});
+        if(!rows.length){ setUploadStatus('That file has no readable rows.', true); alert('That file has no readable rows.'); return; }
+        setUploadStatus(`Parsed ${rows.length} rows. Rebuilding plan…`);
+        rawUploadedRows = rows;
+        const fn=document.getElementById('fileNameDisplay'); if(fn) fn.textContent = file.name;
+        const fm=document.getElementById('fileMetaDisplay'); if(fm) fm.textContent = `${rows.length} rows · read just now`;
+        rebuildFromRawRows();
+        setUploadStatus(`Done — ${file.name} loaded and plan rebuilt.`);
+      } catch(err){
+        setUploadStatus('Could not read that file: ' + err.message, true);
+        alert('Could not read that file: ' + err.message);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+// Check once, shortly after load, whether the CDN-hosted Excel-reading library actually arrived —
+// surfaces network/CDN-blocking issues as a visible banner instead of a silent failure.
+setTimeout(()=>{
+  const warn = document.getElementById('libWarning');
+  if(warn && typeof XLSX==='undefined'){
+    warn.style.display='block';
+    warn.textContent = '⚠ The file-reading library (from cdnjs.cloudflare.com) did not load — file upload won\'t work until this loads. Check your internet connection, disable any ad-blocker for this page, or reload.';
+  }
+}, 2500);
+
+countUpView('upload');
+
+/* ============ Export to Excel (client-side, via SheetJS) ============ */
+function todayStr(){
+  const d=new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function sheetFromRows(rows, headers){
+  const ws = XLSX.utils.json_to_sheet(rows, {header:headers});
+  ws['!cols'] = headers.map(h=>({wch: Math.max(10, h.length+2)}));
+  return ws;
+}
+
+function exportBlockA(){
+  if(typeof XLSX==='undefined'){ alert('Export library did not load — check your internet connection.'); return; }
+  const rows = DATA.blockA_bags.map(b=>({'Sort code':b['Sort code'], 'Sellers in bag':b.sellers||'', 'Nodes':b.nodes, 'Shipments':b.shipments}));
+  const ws = sheetFromRows(rows, ['Sort code','Sellers in bag','Nodes','Shipments']);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Block-A Manifest');
+  XLSX.writeFile(wb, `Block-A_Manifest_${todayStr()}.xlsx`);
+}
+
+function exportRoutes(){
+  if(typeof XLSX==='undefined'){ alert('Export library did not load — check your internet connection.'); return; }
+  const routeRows=[], stopRows=[];
+  const assignLookup = {};       // route code -> rider/vehicle ID (for routes assigned whole)
+  const nodeAssignLookup = {};   // node_id -> rider/vehicle ID (covers individually-inserted nodes too)
+  if(window.DISPATCH){
+    window.DISPATCH.riders.forEach((r,i)=>{
+      const id = `R-${String(i+1).padStart(2,'0')}`;
+      r.routes.forEach(x=>{ assignLookup[x.code]=id; x.stops.forEach(s=>nodeAssignLookup[s.node_id]=id); });
+    });
+    window.DISPATCH.vehicles.forEach((v,i)=>{
+      const id = `V-${i+1}`;
+      v.routes.forEach(x=>{ assignLookup[x.code]=id; x.stops.forEach(s=>nodeAssignLookup[s.node_id]=id); });
+    });
+  }
+  allRoutesFlat().forEach(r=>{
+    routeRows.push({'Route':r.code,'Zone':r.zoneLabel,'Type':r.type,'Nodes':r.nodes,'Shipments':r.shipments,
+      'Km':r.km,'Fill %':Math.round(r.fill_pct)+'%','Clusters touched':r.clustersTouched.join(' + '),
+      'Assigned to':assignLookup[r.code]||'—'});
+    r.stops.forEach((s,si)=>{
+      stopRows.push({'Route':r.code,'Assigned to':nodeAssignLookup[s.node_id]||'—','Zone':r.zoneLabel,'Type':r.type,
+        'Stop #':si+1,'Sort code':s.sort_code||'—','Node ID':s.node_id,'Seller':s.name,'Shipments':s.shipments,'Cluster':s.cluster});
+    });
+  });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, sheetFromRows(routeRows, ['Route','Zone','Type','Nodes','Shipments','Km','Fill %','Clusters touched','Assigned to']), 'Route Summary');
+  XLSX.utils.book_append_sheet(wb, sheetFromRows(stopRows, ['Route','Assigned to','Zone','Type','Stop #','Sort code','Node ID','Seller','Shipments','Cluster']), 'Route Detail');
+  if(window.DISPATCH && window.DISPATCH.stillUnassigned && window.DISPATCH.stillUnassigned.length){
+    const unRows = window.DISPATCH.stillUnassigned.map(s=>({'Sort code':s.sort_code||'—','Node ID':s.node_id,'Seller':s.name,
+      'Zone':s.zone||'','Cluster':s.cluster,'Shipments':s.shipments,'Reason':'No route or nearby en-route slot fits under caps/detour limit'}));
+    XLSX.utils.book_append_sheet(wb, sheetFromRows(unRows, ['Sort code','Node ID','Seller','Zone','Cluster','Shipments','Reason']), 'Carried to Next Plan');
+  }
+  XLSX.writeFile(wb, `RTS_Routes_${todayStr()}.xlsx`);
+}
+
+function exportZonesClusters(){
+  if(typeof XLSX==='undefined'){ alert('Export library did not load — check your internet connection.'); return; }
+  const rows = (DATA.cluster_centroids||[]).map((c,i)=>({'#':i+1,'Zone':c.zone,'Cluster':c.cluster,'Lat':c.lat,'Lng':c.lng}));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, sheetFromRows(rows, ['#','Zone','Cluster','Lat','Lng']), 'Zone-Cluster Centroids');
+  XLSX.writeFile(wb, `RTS_Zones_Clusters_${todayStr()}.xlsx`);
+}
+
+function exportDispatch(){
+  if(typeof XLSX==='undefined'){ alert('Export library did not load — check your internet connection.'); return; }
+  if(!window.DISPATCH){ alert('Dispatch data not ready yet — open the Rider assignment tab first.'); return; }
+  const rows=[];
+  window.DISPATCH.riders.forEach((r,i)=>rows.push({'ID':`R-${String(i+1).padStart(2,'0')}`,'Type':'Rider',
+    'Routes carried':r.routes.map(x=>x.code).join(', '),'Zone(s)':[...new Set(r.routes.filter(x=>x.zoneLabel).map(x=>x.zoneLabel))].join(', '),
+    'Nodes':r.nodes,'Shipments':r.shipments,'Km':Math.round(r.km*10)/10,'Load fill %':Math.round(r.shipments/100*100)+'%'}));
+  window.DISPATCH.vehicles.forEach((v,i)=>rows.push({'ID':`V-${i+1}`,'Type':'Vehicle',
+    'Routes carried':v.routes.map(x=>x.code).join(', '),'Zone(s)':[...new Set(v.routes.filter(x=>x.zoneLabel).map(x=>x.zoneLabel))].join(', '),
+    'Nodes':v.nodes,'Shipments':v.shipments,'Km':Math.round(v.km*10)/10,'Load fill %':Math.round(v.shipments/1200*100)+'%'}));
+  if(window.DISPATCH.stillUnassigned) window.DISPATCH.stillUnassigned.forEach(s=>rows.push({'ID':'CARRIED OVER','Type':'—',
+    'Routes carried':s.sort_code||s.node_id,'Zone(s)':s.zone||'','Nodes':1,'Shipments':s.shipments,'Km':'','Load fill %':''}));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, sheetFromRows(rows, ['ID','Type','Routes carried','Zone(s)','Nodes','Shipments','Km','Load fill %']), 'Dispatch Sheet');
+  XLSX.writeFile(wb, `RTS_Dispatch_${todayStr()}.xlsx`);
+}
+
+const b1=document.getElementById('exportP1Btn'); if(b1) b1.addEventListener('click', exportBlockA);
+const b2=document.getElementById('exportRoutesBtn'); if(b2) b2.addEventListener('click', exportRoutes);
+const b3=document.getElementById('exportRidersBtn'); if(b3) b3.addEventListener('click', exportDispatch);
+const b4=document.getElementById('exportZonesBtn'); if(b4) b4.addEventListener('click', exportZonesClusters);
+
+
+</script>
+</body>
+</html>
