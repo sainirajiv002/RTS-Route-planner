@@ -280,17 +280,18 @@ td.num,th.num{text-align:right}
       <div id="libWarning" style="display:none;background:#FBEEED;border:1px solid #E4B0AC;color:#7A4D0E;font-size:11.5px;padding:8px 12px;border-radius:3px;margin-bottom:12px;text-align:left"></div>
       <label for="fileInput" class="btn ghost" id="replaceFileBtn" style="display:inline-block;cursor:pointer">Choose file to replace</label>
       <input type="file" id="fileInput" accept=".csv,.xlsx,.xls" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0">
-      <div id="uploadStatus" style="font-size:11px;color:var(--faint);margin-top:8px"></div>
+      <div id="uploadStatus" style="display:none;font-size:13px;font-weight:600;padding:10px 14px;border-radius:4px;margin-top:12px;text-align:left"></div>
+      <div id="uploadStatusDetail" style="font-size:11px;color:var(--faint);margin-top:6px"></div>
     </div>
 
     <div class="hr"></div>
 
     <div class="split">
       <div class="card">
-        <div class="ch"><h3>Service type breakdown</h3><span class="tag t3">5 types found</span></div>
+        <div class="ch"><h3>Service type breakdown</h3><span class="tag t3" id="serviceTypesFoundTag">5 types found</span></div>
         <table>
           <thead><tr><th>Service type</th><th>Meaning</th><th class="num">Shipments</th><th>Used in plan?</th></tr></thead>
-          <tbody>
+          <tbody id="t-servicetype">
             <tr><td class="mono">Block-A</td><td>SDD — rides out with forward pickup</td><td class="num mono">7,971</td><td><span class="tag t1">Phase 1</span></td></tr>
             <tr><td class="mono">NDD OFD</td><td>NDD — collected by NDD pickup riders</td><td class="num mono">4,355</td><td><span class="tag t2">Phase 2</span></td></tr>
             <tr><td class="mono">Rider route</td><td>Reverse fleet — dedicated riders/vehicles</td><td class="num mono">3,133</td><td><span class="tag t3">Phase 3</span></td></tr>
@@ -1125,7 +1126,8 @@ function classifyRows(rows){
   const sortCol = detectColumn(headers, ['sort code','sort_code']);
   const nodeIdCol = detectColumn(headers, ['node id','node_id']);
   if(!catCol || !nameCol){
-    alert('Could not find the expected columns (service type / seller name) in this file. Check the headers.');
+    const missing = [!catCol?'service type/block':null, !nameCol?'seller name':null].filter(Boolean).join(', ');
+    if(typeof setUploadStatus==='function') setUploadStatus(`✗ Could not find these columns: ${missing}. Found instead: ${headers.slice(0,8).join(', ')}${headers.length>8?'…':''}`, true);
     return null;
   }
   // Two supported shapes:
@@ -1312,6 +1314,24 @@ function refreshTopLevelStats(){
   setCount('p2Nodes', S2.nddofd_nodes);
   set('p2NodesFoot', `${S2.nddofd_shipments.toLocaleString('en-IN')} shipments`);
   setCount('p2Bags', S2.nddofd_bags);
+
+  // Upload page: Service type breakdown table (was fully static before — now built live)
+  const stBody = document.getElementById('t-servicetype');
+  if(stBody){
+    const rows = [
+      {label:'Block-A', meaning:'SDD — rides out with forward pickup', shp:S2.blockA_shipments, tag:'t1', used:'Phase 1'},
+      {label:'NDD OFD', meaning:'NDD — collected by NDD pickup riders', shp:S2.nddofd_shipments, tag:'t2', used:'Phase 2'},
+      {label:'Rider route', meaning:'Reverse fleet — dedicated riders/vehicles', shp:S2.riderroute_shipments, tag:'t3', used:'Phase 3'},
+      {label:'Pincode update', meaning:'Pincode exception queue', shp:S2.pincode_update_shipments, tag:'tn', used:'Excluded'},
+    ];
+    if(S2.unmapped_shipments) rows.push({label:'Unmapped', meaning:'Address could not be geocoded', shp:S2.unmapped_shipments, tag:'tn', used:'Excluded'});
+    stBody.innerHTML = rows.map(r=>`<tr><td class="mono">${r.label}</td><td>${r.meaning}</td><td class="num mono">${r.shp.toLocaleString('en-IN')}</td><td><span class="tag ${r.tag}">${r.used}</span></td></tr>`).join('');
+    const tag = document.getElementById('serviceTypesFoundTag'); if(tag) tag.textContent = `${rows.length} types found`;
+  }
+
+  // Re-trigger the count-up animation for every view — data-count attributes just changed,
+  // but the animated text only updates when explicitly told to (whether or not that view is visible now).
+  ['upload','day','p1','p2','p3','riders'].forEach(v=>countUpView(v));
 }
 
 function rebuildFromRawRows(){
@@ -1602,20 +1622,34 @@ if(sv) sv.addEventListener('click',function(){
 /* ============ file upload: real replace-file input (native <label for> trigger — no JS click() needed, works on every browser/mobile webview) ============ */
 const fileInput = document.getElementById('fileInput');
 function finishUpload(file, rows){
-  if(!rows.length){ setUploadStatus('That file has no readable rows.', true); alert('That file has no readable rows.'); return; }
-  setUploadStatus(`Parsed ${rows.length} rows. Rebuilding plan…`);
+  if(!rows.length){ setUploadStatus('That file has no readable rows.', true); return; }
+  setUploadStatus(`Parsed ${rows.length} rows. Rebuilding plan…`, false, true);
   rawUploadedRows = rows;
   const fn=document.getElementById('fileNameDisplay'); if(fn) fn.textContent = file.name;
   const fm=document.getElementById('fileMetaDisplay'); if(fm) fm.textContent = `${rows.length} rows · read just now`;
-  const ok = rebuildFromRawRows();
-  if(ok) setUploadStatus(`Done — ${file.name} loaded and plan rebuilt.`);
-  else setUploadStatus(`Could not build a plan from ${file.name} — check the column headers.`, true);
+  let ok = false, errMsg = '';
+  try{
+    ok = rebuildFromRawRows();
+  } catch(e){
+    errMsg = e.message;
+  }
+  if(ok) setUploadStatus(`✓ Done — ${file.name} loaded and plan rebuilt (${rows.length} rows).`, false);
+  else if(errMsg) setUploadStatus(`✗ Could not build a plan from ${file.name}: ${errMsg}`, true);
+  // else: classifyRows already set a specific "which columns are missing" message — don't overwrite it.
 }
-const uploadStatusEl = document.getElementById('uploadStatus');
-function setUploadStatus(msg, isError){
-  if(!uploadStatusEl) return;
-  uploadStatusEl.textContent = msg;
-  uploadStatusEl.style.color = isError ? 'var(--alert)' : 'var(--faint)';
+// Prominent, unmissable banner — does NOT rely on alert(), which some sandboxed preview
+// contexts (embedded viewers, some webviews) silently block with no visible effect at all.
+function setUploadStatus(msg, isError, isBusy){
+  const el = document.getElementById('uploadStatus');
+  if(!el) return;
+  el.style.display = 'block';
+  el.textContent = msg;
+  if(isBusy){ el.style.background = '#EAF4F9'; el.style.color = '#15678C'; el.style.border = '1px solid #B7D9E6'; }
+  else if(isError){ el.style.background = '#FBEEED'; el.style.color = '#BE332B'; el.style.border = '1px solid #E4B0AC'; }
+  else { el.style.background = '#EDF6E9'; el.style.color = '#0B6B3A'; el.style.border = '1px solid #B7D9C0'; }
+}
+function setUploadDetail(msg){
+  const el = document.getElementById('uploadStatusDetail'); if(el) el.textContent = msg;
 }
 function looksLikeGarbledHeaders(headers){
   // sanity check: real column headers are short, printable text. If parsing corrupted the
@@ -1632,48 +1666,62 @@ function parseWorkbookRows(wb){
 }
 if(fileInput){
   fileInput.addEventListener('change', (e)=>{
+    setUploadDetail('');
     const file = e.target.files[0];
     if(!file){ setUploadStatus('No file selected.', true); return; }
-    setUploadStatus(`Reading ${file.name}…`);
+    setUploadStatus(`Reading ${file.name}…`, false, true);
     if(typeof XLSX==='undefined'){
-      setUploadStatus('File-reading library did not load — check your internet connection and reload the page.', true);
-      alert('File-reading library did not load — check your internet connection and reload the page.');
+      setUploadStatus('✗ The file-reading library did not load — check your internet connection, disable any ad-blocker, and reload the page.', true);
       return;
     }
     const reader = new FileReader();
-    reader.onerror = ()=> setUploadStatus('Could not read the file from disk.', true);
+    reader.onerror = ()=> setUploadStatus('✗ Could not read the file from disk — try again or try a different file.', true);
     reader.onload = (evt)=>{
       try{
-        let rows;
+        let rows = [];
+        let primaryErr = '';
         try{
           const wb = XLSX.read(evt.target.result, {type:'binary'});
           rows = parseWorkbookRows(wb);
-        } catch(e){ rows = []; }
+        } catch(e){ primaryErr = e.message; rows = []; }
         // safety net: if the primary read produced garbled/empty output, retry with the other strategy
         if(!rows.length || looksLikeGarbledHeaders(Object.keys(rows[0]||{}))){
+          setUploadDetail('First read attempt looked wrong — trying an alternate method…');
           const reader2 = new FileReader();
+          reader2.onerror = ()=> setUploadStatus('✗ Could not read the file from disk on the second attempt either.', true);
           reader2.onload = (evt2)=>{
             try{
               const wb2 = XLSX.read(evt2.target.result, {type:'array'});
               const rows2 = parseWorkbookRows(wb2);
+              if(!rows2.length || looksLikeGarbledHeaders(Object.keys(rows2[0]||{}))){
+                setUploadStatus('✗ Could not parse this file with either method — it may be corrupted, password-protected, or in an unsupported format. Try re-saving it as a fresh .xlsx or .csv from Excel.', true);
+                return;
+              }
               finishUpload(file, rows2);
             } catch(err2){
-              setUploadStatus('Could not read that file: ' + err2.message, true);
-              alert('Could not read that file — it may be corrupted or in an unsupported format: ' + err2.message);
+              setUploadStatus('✗ Could not read that file: ' + err2.message, true);
             }
           };
-          reader2.readAsArrayBuffer(file);
+          try{ reader2.readAsArrayBuffer(file); }
+          catch(e3){ setUploadStatus('✗ Could not start reading the file (second attempt): ' + e3.message, true); }
           return;
         }
         finishUpload(file, rows);
       } catch(err){
-        setUploadStatus('Could not read that file: ' + err.message, true);
-        alert('Could not read that file: ' + err.message);
+        setUploadStatus('✗ Unexpected error while reading that file: ' + err.message, true);
       }
     };
-    reader.readAsBinaryString(file);
+    try{ reader.readAsBinaryString(file); }
+    catch(e){ setUploadStatus('✗ Could not start reading the file: ' + e.message, true); }
   });
 }
+// Catch anything that slips past every try/catch above — a silent failure should be impossible.
+window.addEventListener('error', (e)=>{
+  const uploadView = document.getElementById('v-upload');
+  if(uploadView && uploadView.style.display !== 'none'){
+    setUploadStatus('✗ Unexpected page error: ' + e.message + ' — please screenshot this and report it.', true);
+  }
+});
 // Check once, shortly after load, whether the CDN-hosted Excel-reading library actually arrived —
 // surfaces network/CDN-blocking issues as a visible banner instead of a silent failure.
 setTimeout(()=>{
