@@ -699,7 +699,7 @@ function haversineGeo(lat1,lng1,lat2,lng2){
 
 /* live, editable planning rules — defaults match fixed_cluster_grid.py */
 let RULES = {
-  node_cap_per_route: 6, shipment_cap_per_route: 100, vehicle_solo_threshold: 100,
+  node_cap_per_route: 12, shipment_cap_per_route: 100, vehicle_solo_threshold: 100,
   rider_count: 25, vehicle_count: 5, vehicle_shipment_cap: 1200,
   enroute_max_detour_km: 3.0, enroute_max_detour_pct: 40,
   assignment_priority: 'shipment_size_desc'
@@ -1127,6 +1127,7 @@ function classifyRows(rows){
   const shipCol = detectColumn(headers, ['total','rts_count','shipments','shipment count']);
   const nameCol = detectColumn(headers, ['seller_name','seller name','seller']);
   const pinCol = detectColumn(headers, ['seller_pincode','pincode']);
+  const addrCol = detectColumn(headers, ['seller_address','seller address','address']);
   const sortCol = detectColumn(headers, ['sort code','sort_code']);
   const nodeIdCol = detectColumn(headers, ['node id','node_id']);
   if(!catCol || !nameCol){
@@ -1155,12 +1156,16 @@ function classifyRows(rows){
         name: r[nameCol] || 'Unknown seller',
         sort_code: sortCol ? r[sortCol] : '—',
         pincode: pinCol ? String(r[pinCol]||'').replace(/\.0$/,'') : '',
+        address: addrCol ? r[addrCol] : '',
         shipments: parseFloat(r[shipCol])||0
       };
       buckets[bucketOf(cat)].push(entry);
     });
   } else {
-    // group raw shipment rows into per-node entries, keyed by seller name + pincode
+    // group raw shipment rows into per-node entries, keyed by seller name + pincode.
+    // NOTE: a placeholder pincode (e.g. 909192) means "unknown" — every seller using it gets
+    // grouped together under that placeholder for THIS seller, then resolved via address-text
+    // fallback in geocodeAndAssign() rather than being silently dropped as unmapped.
     const grouped = {}; // bucketName -> { key -> entry }
     Object.keys(buckets).forEach(b=>grouped[b]={});
     rows.forEach((r,i)=>{
@@ -1172,7 +1177,7 @@ function classifyRows(rows){
       if(!grouped[bname][key]){
         grouped[bname][key] = {
           node_id: nodeIdCol ? r[nodeIdCol] : `NODE-${Object.keys(grouped[bname]).length+1}`,
-          name, sort_code: sortCol ? r[sortCol] : '—', pincode, shipments: 0
+          name, sort_code: sortCol ? r[sortCol] : '—', pincode, address: addrCol ? r[addrCol] : '', shipments: 0
         };
       }
       grouped[bname][key].shipments += 1;
@@ -1181,13 +1186,63 @@ function classifyRows(rows){
   }
   return buckets;
 }
+/* Locality keyword -> zone fallback, for shipments stuck under a placeholder pincode (e.g. 909192)
+   that don't exist in PINCODE_TABLE. Consolidated from every manual address-resolution pass done
+   this session (CODE_MOVE, NDD split, and the 25/6 + 35/6 reverse-fleet rebuilds). Zone-level only —
+   assigns to that zone's largest cluster as an anchor point, which is far better than dropping the
+   shipment entirely, though less precise than a real pincode match. */
+const ADDRESS_KEYWORD_ZONE = [
+  ['sector 138','Greater Noida'], ['noida','Greater Noida'], ['hapur','Greater Noida'],
+  ['dasna','Greater Noida'], ['dhaulana','Greater Noida'], ['pilkhuwa','Greater Noida'], ['galland','Greater Noida'],
+  ['kasna','Greater Noida'], ['ecotech','Greater Noida'],
+  ['bijwasan','South-West Delhi'], ['udyog vihar','South-West Delhi'], ['najafgarh','South-West Delhi'],
+  ['mundka','South-West Delhi'],
+  ['okhla','South Delhi'], ['vasant kunj','South Delhi'], ['nelson mandela','South Delhi'],
+  ['rohini','Rohini / North-West Delhi'], ['rithala','Rohini / North-West Delhi'], ['mangol puri','Rohini / North-West Delhi'],
+  ['mangolpuri','Rohini / North-West Delhi'],
+  ['farukh nagar','Farrukhnagar / Jhajjar Belt'], ['farukhnagar','Farrukhnagar / Jhajjar Belt'],
+  ['farrukhnagar','Farrukhnagar / Jhajjar Belt'], ['sanpka','Farrukhnagar / Jhajjar Belt'],
+  ['taj nagar','Farrukhnagar / Jhajjar Belt'], ['tajnagar','Farrukhnagar / Jhajjar Belt'],
+  ['jhajjar','Farrukhnagar / Jhajjar Belt'], ['pd logistic park','Farrukhnagar / Jhajjar Belt'],
+  ['kulana','Farrukhnagar / Jhajjar Belt'], ['luhari','Farrukhnagar / Jhajjar Belt'], ['behrampur road','Farrukhnagar / Jhajjar Belt'],
+  ['mewat','Manesar / Pataudi Belt'], ['tauru','Manesar / Pataudi Belt'], ['pataudi','Manesar / Pataudi Belt'],
+  ['bahora kalan','Manesar / Pataudi Belt'], ['manesar','Manesar / Pataudi Belt'], ['faredpur','Manesar / Pataudi Belt'],
+  ['gwal pahari','Gurugram Belt'], ['behrampur','Gurugram Belt'], ['kherki daula','Gurugram Belt'], ['kherki','Gurugram Belt'],
+  ['fazilpur','Gurugram Belt'], ['jharsa','Gurugram Belt'], ['nathupoor','Gurugram Belt'], ['ambi mall','Gurugram Belt'],
+  ['sector 49','Gurugram Belt'], ['sector 76','Gurugram Belt'], ['sher shah suri','Gurugram Belt'],
+  ['gurgaon','Gurugram Belt'], ['gurugram','Gurugram Belt'], ['golf course','Gurugram Belt'],
+  ['patparganj','East Delhi / Noida Border'], ['jhilmil','East Delhi / Noida Border'], ['ghaziabad','East Delhi / Noida Border'],
+  ['faridabad','Faridabad-Ballabgarh'], ['ballabgarh','Faridabad-Ballabgarh'],
+  ['sonipat','North Delhi / Sonipat'], ['bahadurgarh','North Delhi / Sonipat'],
+];
+function addressKeywordZone(addr){
+  if(!addr) return null;
+  const a = String(addr).toLowerCase();
+  for(const [kw, zone] of ADDRESS_KEYWORD_ZONE){ if(a.includes(kw)) return zone; }
+  return null;
+}
+function anchorClusterForZone(zone){
+  const cands = FIXED_CLUSTERS.filter(c=>c.zone===zone);
+  return cands.length ? cands[0] : null;
+}
 function geocodeAndAssign(riderRouteRows){
   const unmapped = [];
   const geocoded = riderRouteRows.map(r=>{
     const ll = PINCODE_TABLE[r.pincode];
-    if(!ll || isNaN(ll[0])){ unmapped.push(r); return null; }
-    const nearest = nearestFixedCluster(ll[0], ll[1]);
-    return {...r, lat:ll[0], lng:ll[1], cluster_code:nearest.code, cluster:nearest.cluster, zone_label:nearest.zone, dist_km:nearest.dist};
+    if(ll && !isNaN(ll[0])){
+      const nearest = nearestFixedCluster(ll[0], ll[1]);
+      return {...r, lat:ll[0], lng:ll[1], cluster_code:nearest.code, cluster:nearest.cluster, zone_label:nearest.zone, dist_km:nearest.dist, geocode_method:'pincode'};
+    }
+    // pincode missing or placeholder (e.g. 909192) — try resolving from the address text instead
+    // of silently dropping this seller's whole volume.
+    const zone = addressKeywordZone(r.address);
+    if(zone){
+      const anchor = anchorClusterForZone(zone);
+      if(anchor){
+        return {...r, lat:anchor.lat, lng:anchor.lng, cluster_code:anchor.code, cluster:anchor.cluster, zone_label:anchor.zone, dist_km:null, geocode_method:'address_keyword'};
+      }
+    }
+    unmapped.push(r); return null;
   }).filter(Boolean);
   return {geocoded, unmapped};
 }
@@ -1525,6 +1580,52 @@ function renderRiders(){
     }
   });
 
+  // ============ Consolidation pass ============
+  // A rider under 30% shipment-fill is wasted capacity — try to fold its whole route into
+  // another rider/vehicle (any zone) that has room and isn't a real detour to reach.
+  const MIN_UTIL = 0.30;
+  const CONSOLIDATE_DETOUR_KM = 8.0, CONSOLIDATE_DETOUR_PCT = 80;
+  function consolidatePool(pool, nodeCap, shipCap){
+    let changed = true;
+    while(changed){
+      changed = false;
+      pool.sort((a,b)=>(a.shipments/shipCap)-(b.shipments/shipCap));
+      for(let i=0;i<pool.length;i++){
+        const thinV = pool[i];
+        if(thinV.shipments/shipCap >= MIN_UTIL) continue;
+        const thinStops = flatPath(thinV);
+        let best = null;
+        for(let j=0;j<pool.length;j++){
+          const target = pool[j];
+          if(target===thinV) continue;
+          if(target.nodes+thinV.nodes>nodeCap || target.shipments+thinV.shipments>shipCap) continue;
+          let path = flatPath(target);
+          let totalExtra = 0, ok = true;
+          for(const s of thinStops){
+            const {extra, base} = cheapestInsertion(path, s);
+            const pct = base>0 ? extra/base*100 : 999;
+            if(extra>CONSOLIDATE_DETOUR_KM || pct>CONSOLIDATE_DETOUR_PCT){ ok=false; break; }
+            path = [...path, s];
+            totalExtra += extra;
+          }
+          if(!ok) continue;
+          if(!best || totalExtra<best.extraKm) best = {target, extraKm: totalExtra};
+        }
+        if(best){
+          best.target.routes.push(...thinV.routes);
+          best.target.nodes += thinV.nodes;
+          best.target.shipments += thinV.shipments;
+          best.target.km += best.extraKm;
+          pool.splice(i,1);
+          changed = true;
+          break;
+        }
+      }
+    }
+  }
+  consolidatePool(riders, RIDER_NODE, RIDER_SHIP);
+  consolidatePool(vehicles, VEH_NODE, VEH_SHIP);
+
   const rows=[
     ...riders.map((r,i)=>({id:'R-'+String(i+1).padStart(2,'0'),label:'Rider '+(i+1),codes:r.routes.map(x=>x.code).join(', '),area:r.routes[0].zoneLabel+' / '+r.routes[0].clustersTouched.join('+'),nodes:r.nodes,shipments:r.shipments,km:r.km.toFixed(1),cap:RIDER_SHIP})),
     ...vehicles.map((v,i)=>({id:'V-'+(i+1),label:'Vehicle '+(i+1),codes:v.routes.map(x=>x.code).join(', '),area:v.routes[0].zoneLabel+' / '+v.routes[0].clustersTouched.join('+'),nodes:v.nodes,shipments:v.shipments,km:v.km.toFixed(1),cap:VEH_SHIP}))
@@ -1787,12 +1888,16 @@ function exportRoutes(){
       v.routes.forEach(x=>{ assignLookup[x.code]=id; x.stops.forEach(s=>nodeAssignLookup[s.node_id]=id); });
     });
   }
-  allRoutesFlat().forEach(r=>{
+  // Only include routes that actually made it onto a rider/vehicle. A route that was FORMED at
+  // the zone-packing stage but never got a rider (common when the fleet can't cover everything)
+  // is not a real, dispatchable route — it belongs in "Carried to Next Plan", not mixed in here
+  // looking identical to routes someone can actually act on today.
+  allRoutesFlat().filter(r=>assignLookup[r.code]).forEach(r=>{
     routeRows.push({'Route':r.code,'Zone':r.zoneLabel,'Type':r.type,'Nodes':r.nodes,'Shipments':r.shipments,
       'Km':r.km,'Fill %':Math.round(r.fill_pct)+'%','Clusters touched':r.clustersTouched.join(' + '),
-      'Assigned to':assignLookup[r.code]||'—'});
+      'Assigned to':assignLookup[r.code]});
     r.stops.forEach((s,si)=>{
-      stopRows.push({'Route':r.code,'Assigned to':nodeAssignLookup[s.node_id]||'—','Zone':r.zoneLabel,'Type':r.type,
+      stopRows.push({'Route':r.code,'Assigned to':nodeAssignLookup[s.node_id]||assignLookup[r.code],'Zone':r.zoneLabel,'Type':r.type,
         'Stop #':si+1,'Sort code':s.sort_code||'—','Node ID':s.node_id,'Seller':s.name,'Shipments':s.shipments,'Cluster':s.cluster});
     });
   });
